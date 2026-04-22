@@ -1,6 +1,9 @@
 # termux-linux-setup
 
-Termux desktop bootstrap script for Android with support for XFCE4, LXQt, MATE, and KDE Plasma.
+Termux setup script for Android with two install modes:
+
+- Native Termux desktop mode (XFCE4, LXQt, MATE, KDE Plasma)
+- Linux distro container mode via proot-distro (Debian, Ubuntu, Arch Linux)
 
 This fork adds stability improvements and optional features that users requested in upstream issues, including optional TigerVNC setup and cleanup/uninstall tooling.
 
@@ -14,6 +17,8 @@ This fork adds stability improvements and optional features that users requested
 - Adds toggles to skip optional app installation and desktop shortcut generation
 - Adds generated `uninstall-linux.sh` cleanup helper
 - Adds optional TigerVNC server setup with `start-vnc.sh` and `stop-vnc.sh`
+- Adds install mode selection: Native desktop or proot distro
+- Adds distro selection support: Debian, Ubuntu, Arch Linux
 
 ## Prerequisites
 
@@ -45,7 +50,12 @@ chmod +x termux-linux-setup.sh
 
 ## Interactive Options During Setup
 
-The installer now asks whether to:
+The installer first asks for install mode:
+
+- Native Termux Desktop
+- Linux Distro (proot): Debian, Ubuntu, or Arch Linux
+
+If you choose native desktop mode, it then asks whether to:
 
 - Install optional GUI apps (Firefox, VLC, Git, Wget, Curl)
 - Create desktop shortcuts
@@ -60,6 +70,12 @@ After install, these helper scripts are created in your home directory:
 - `./start-linux-safe.sh` - start with compatibility rendering mode (no Zink)
 - `./stop-linux.sh` - stop desktop session
 - `./uninstall-linux.sh` - cleanup generated files and optionally remove packages
+
+If distro mode was selected:
+
+- `./start-distro.sh` - login to selected distro container
+- `./update-distro.sh` - update distro packages
+- `./remove-distro.sh` - remove selected distro container
 
 If VNC was enabled:
 
@@ -83,8 +99,11 @@ You can choose another VNC display by passing an argument, for example:
   - The script now installs `xkeyboard-config` and exports `XKB_CONFIG_ROOT`
 - LXQt starts broken or asks for WM:
   - This fork installs `openbox` and writes LXQt session WM config automatically
+- Distro mode install fails:
+  - Run `proot-distro install debian` (or `ubuntu` / `archlinux`) manually to inspect errors
 
 ## Notes
 
 - KDE Plasma is resource-heavy and may not be stable on all devices.
 - If your device is non-Adreno or unstable with Vulkan, compatibility mode is usually more reliable.
+- Distro mode installs a CLI container by default; desktop/VNC inside the distro is optional and can be installed later.

@@ -13,8 +13,12 @@
 # ============== CONFIGURATION ==============
 TOTAL_STEPS=12
 CURRENT_STEP=0
+INSTALL_MODE="native"
 DE_CHOICE="1"
 DE_NAME="XFCE4"
+DISTRO_CHOICE="1"
+DISTRO_ID="debian"
+DISTRO_NAME="Debian"
 INSTALL_OPTIONAL_APPS=1
 CREATE_DESKTOP_SHORTCUTS=1
 ENABLE_VNC=0
@@ -117,6 +121,64 @@ BANNER
 
 # ============== DEVICE & USER SELECTION ==============
 setup_environment() {
+    echo -e "${CYAN}Choose install mode:${NC}"
+    echo -e "  ${WHITE}1) Native Termux Desktop${NC}  (Current full desktop workflow)"
+    echo -e "  ${WHITE}2) Linux Distro (proot)${NC}   (Debian/Ubuntu/Arch container)"
+    echo ""
+    while true; do
+        read -p "Enter mode (1-2) [default: 1]: " MODE_INPUT
+        MODE_INPUT=${MODE_INPUT:-1}
+        if [[ "$MODE_INPUT" =~ ^[1-2]$ ]]; then
+            break
+        else
+            echo "Invalid input. Please enter 1 or 2."
+        fi
+    done
+
+    if [ "$MODE_INPUT" == "2" ]; then
+        INSTALL_MODE="distro"
+        TOTAL_STEPS=6
+        echo ""
+        echo -e "${CYAN}Choose distro:${NC}"
+        echo -e "  ${WHITE}1) Debian${NC}"
+        echo -e "  ${WHITE}2) Ubuntu${NC}"
+        echo -e "  ${WHITE}3) Arch Linux${NC}"
+        echo ""
+        while true; do
+            read -p "Enter distro (1-3) [default: 1]: " DISTRO_INPUT
+            DISTRO_INPUT=${DISTRO_INPUT:-1}
+            if [[ "$DISTRO_INPUT" =~ ^[1-3]$ ]]; then
+                DISTRO_CHOICE="$DISTRO_INPUT"
+                break
+            else
+                echo "Invalid input. Please enter 1, 2, or 3."
+            fi
+        done
+
+        case $DISTRO_CHOICE in
+            1)
+                DISTRO_ID="debian"
+                DISTRO_NAME="Debian"
+                ;;
+            2)
+                DISTRO_ID="ubuntu"
+                DISTRO_NAME="Ubuntu"
+                ;;
+            3)
+                DISTRO_ID="archlinux"
+                DISTRO_NAME="Arch Linux"
+                ;;
+        esac
+
+        echo -e "\n${GREEN}[+] Install mode: Linux Distro (proot)${NC}"
+        echo -e "${GREEN}[+] Selected distro: ${DISTRO_NAME}${NC}"
+        sleep 2
+        return
+    fi
+
+    INSTALL_MODE="native"
+    TOTAL_STEPS=12
+
     echo -e "${PURPLE}[*] Detecting your device...${NC}"
     echo ""
     
@@ -221,6 +283,119 @@ setup_environment() {
         echo -e "${YELLOW}[+] Rendering mode: Compatibility (llvmpipe)${NC}"
     fi
     sleep 2
+}
+
+# ============== DISTRO STEP 1: INSTALL PROOT BASE ==============
+step_distro_base() {
+    update_progress
+    echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Installing proot distro tools...${NC}"
+    echo ""
+    install_pkg "proot-distro" "proot-distro"
+    install_pkg "pulseaudio" "PulseAudio Server"
+}
+
+# ============== DISTRO STEP 2: INSTALL SELECTED DISTRO ==============
+step_distro_install() {
+    update_progress
+    echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Installing ${DISTRO_NAME}...${NC}"
+    echo ""
+
+    if proot-distro login "$DISTRO_ID" -- uname -a > /dev/null 2>&1; then
+        echo -e "  [*] ${DISTRO_NAME} already exists. Skipping fresh install."
+        return
+    fi
+
+    (proot-distro install "$DISTRO_ID" > /dev/null 2>&1) &
+    if ! spinner $! "Installing ${DISTRO_NAME} rootfs..."; then
+        echo -e "${RED}[!] Failed to install ${DISTRO_NAME}.${NC}"
+        echo -e "${YELLOW}    Try running manually: proot-distro install ${DISTRO_ID}${NC}"
+        exit 1
+    fi
+}
+
+# ============== DISTRO STEP 3: CREATE DISTRO LAUNCHERS ==============
+step_distro_launchers() {
+    update_progress
+    echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Creating distro helper scripts...${NC}"
+    echo ""
+
+    cat > ~/start-distro.sh << DISTROSTARTEOF
+#!/data/data/com.termux/files/usr/bin/bash
+echo ""
+echo "[*] Starting ${DISTRO_NAME} container..."
+echo ""
+
+unset PULSE_SERVER
+pulseaudio --kill 2>/dev/null
+pulseaudio --start --exit-idle-time=-1 > /dev/null 2>&1
+sleep 1
+pactl load-module module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1 2>/dev/null
+export PULSE_SERVER=127.0.0.1
+
+exec proot-distro login ${DISTRO_ID}
+DISTROSTARTEOF
+    chmod +x ~/start-distro.sh
+    echo -e "  [+] Created ~/start-distro.sh"
+
+    if [ "$DISTRO_ID" == "archlinux" ]; then
+        cat > ~/update-distro.sh << 'DISTROUPDATEEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+echo "[*] Updating Arch Linux packages..."
+exec proot-distro login archlinux -- pacman -Syu --noconfirm
+DISTROUPDATEEOF
+    else
+        cat > ~/update-distro.sh << DISTROUPDATEEOF
+#!/data/data/com.termux/files/usr/bin/bash
+echo "[*] Updating ${DISTRO_NAME} packages..."
+exec proot-distro login ${DISTRO_ID} -- bash -lc "apt update && apt upgrade -y"
+DISTROUPDATEEOF
+    fi
+    chmod +x ~/update-distro.sh
+    echo -e "  [+] Created ~/update-distro.sh"
+
+    cat > ~/remove-distro.sh << DISTROREMOVEEOF
+#!/data/data/com.termux/files/usr/bin/bash
+echo "[*] Removing ${DISTRO_NAME} container..."
+proot-distro remove ${DISTRO_ID}
+echo "[+] Removed ${DISTRO_NAME}."
+DISTROREMOVEEOF
+    chmod +x ~/remove-distro.sh
+    echo -e "  [+] Created ~/remove-distro.sh"
+}
+
+# ============== DISTRO STEP 4: OPTIONAL GUI BASE ==============
+step_distro_gui_hint() {
+    update_progress
+    echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Optional GUI notes...${NC}"
+    echo ""
+    echo -e "  [*] Distro mode installs a CLI container by default."
+    echo -e "  [*] You can install desktop/VNC inside the distro later."
+}
+
+# ============== DISTRO STEP 5: COMPLETION ==============
+show_distro_completion() {
+    update_progress
+    echo ""
+    echo -e "${GREEN}"
+    cat << 'COMPLETE'
+    ---------------------------------------------------------------
+             [*]  DISTRO INSTALL COMPLETE!  [*]
+    ---------------------------------------------------------------
+COMPLETE
+    echo -e "${NC}"
+
+    echo -e "${WHITE}[*] ${DISTRO_NAME} is ready in proot-distro.${NC}"
+    echo -e "${CYAN}[*] Helper Commands:${NC}"
+    echo "    - ./start-distro.sh   (login to distro)"
+    echo "    - ./update-distro.sh  (upgrade distro packages)"
+    echo "    - ./remove-distro.sh  (remove distro container)"
+    echo ""
+    echo -e "${YELLOW}------------------------------------------------------------${NC}"
+    echo -e "${WHITE}[*] START DISTRO:${NC}   ${GREEN}./start-distro.sh${NC}"
+    echo -e "${WHITE}[*] UPDATE DISTRO:${NC}  ${GREEN}./update-distro.sh${NC}"
+    echo -e "${WHITE}[*] REMOVE DISTRO:${NC}  ${GREEN}./remove-distro.sh${NC}"
+    echo -e "${YELLOW}------------------------------------------------------------${NC}"
+    echo ""
 }
 
 # ============== STEP 1: UPDATE SYSTEM ==============
@@ -776,6 +951,16 @@ COMPLETE
 main() {
     show_banner
     setup_environment
+
+    if [ "$INSTALL_MODE" == "distro" ]; then
+        step_update
+        step_distro_base
+        step_distro_install
+        step_distro_launchers
+        step_distro_gui_hint
+        show_distro_completion
+        return
+    fi
     
     step_update
     step_repos
