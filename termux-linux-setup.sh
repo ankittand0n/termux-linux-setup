@@ -11,10 +11,14 @@
 #######################################################
 
 # ============== CONFIGURATION ==============
-TOTAL_STEPS=11
+TOTAL_STEPS=12
 CURRENT_STEP=0
 DE_CHOICE="1"
 DE_NAME="XFCE4"
+INSTALL_OPTIONAL_APPS=1
+CREATE_DESKTOP_SHORTCUTS=1
+ENABLE_VNC=0
+USE_ZINK=1
 
 # ============== COLORS ==============
 RED='\033[0;31m'
@@ -80,6 +84,22 @@ install_pkg() {
     spinner $! "Installing ${name}..."
 }
 
+prompt_yes_no() {
+    local prompt_text="$1"
+    local default_choice="$2"
+    local answer
+
+    while true; do
+        read -p "${prompt_text} " answer
+        answer=${answer:-$default_choice}
+        case "$answer" in
+            y|Y|yes|YES) return 0 ;;
+            n|N|no|NO) return 1 ;;
+            *) echo "Please answer y or n." ;;
+        esac
+    done
+}
+
 # ============== BANNER ==============
 show_banner() {
     clear
@@ -111,9 +131,11 @@ setup_environment() {
     
     if [[ "$GPU_VENDOR" == *"adreno"* ]] || [[ "$DEVICE_BRAND" == *"samsung"* ]] || [[ "$DEVICE_BRAND" == *"Samsung"* ]] || [[ "$DEVICE_BRAND" == *"oneplus"* ]] || [[ "$DEVICE_BRAND" == *"xiaomi"* ]]; then
         GPU_DRIVER="freedreno"
+        USE_ZINK=1
         echo -e "  [*] GPU: ${WHITE}Adreno (Qualcomm) - Hardware Acceleration Supported${NC}"
     else
         GPU_DRIVER="zink_native"
+        USE_ZINK=0
         echo -e "  [*] GPU: ${WHITE}Non-Adreno - Zink Native Vulkan${NC}"
         echo -e "${YELLOW}      [!] WARNING: Your device may not fully support advanced GPU acceleration.${NC}"
         echo -e "${YELLOW}      [!] We HIGHLY RECOMMEND choosing LXQt or XFCE for smooth performance.${NC}"
@@ -143,8 +165,61 @@ setup_environment() {
         3) DE_NAME="MATE";;
         4) DE_NAME="KDE Plasma";;
     esac
+
+    echo ""
+    if prompt_yes_no "Install optional desktop apps (Firefox/VLC/Git/Wget/Curl)? [Y/n]:" "Y"; then
+        INSTALL_OPTIONAL_APPS=1
+    else
+        INSTALL_OPTIONAL_APPS=0
+    fi
+
+    if prompt_yes_no "Create desktop shortcuts on ~/Desktop? [Y/n]:" "Y"; then
+        CREATE_DESKTOP_SHORTCUTS=1
+    else
+        CREATE_DESKTOP_SHORTCUTS=0
+    fi
+
+    if prompt_yes_no "Install and configure TigerVNC server? [y/N]:" "N"; then
+        ENABLE_VNC=1
+    else
+        ENABLE_VNC=0
+    fi
+
+    if [ "$USE_ZINK" == "1" ]; then
+        if prompt_yes_no "Use Zink GPU acceleration (disable if zink fails)? [Y/n]:" "Y"; then
+            USE_ZINK=1
+        else
+            USE_ZINK=0
+        fi
+    else
+        if prompt_yes_no "Try enabling Zink anyway (may fail on some devices)? [y/N]:" "N"; then
+            USE_ZINK=1
+        else
+            USE_ZINK=0
+        fi
+    fi
     
     echo -e "\n${GREEN}[+] Selected: ${DE_NAME}.${NC}"
+    if [ "$INSTALL_OPTIONAL_APPS" == "1" ]; then
+        echo -e "${GREEN}[+] Optional apps: Enabled${NC}"
+    else
+        echo -e "${YELLOW}[+] Optional apps: Skipped${NC}"
+    fi
+    if [ "$CREATE_DESKTOP_SHORTCUTS" == "1" ]; then
+        echo -e "${GREEN}[+] Desktop shortcuts: Enabled${NC}"
+    else
+        echo -e "${YELLOW}[+] Desktop shortcuts: Skipped${NC}"
+    fi
+    if [ "$ENABLE_VNC" == "1" ]; then
+        echo -e "${GREEN}[+] TigerVNC: Enabled${NC}"
+    else
+        echo -e "${YELLOW}[+] TigerVNC: Disabled${NC}"
+    fi
+    if [ "$USE_ZINK" == "1" ]; then
+        echo -e "${GREEN}[+] Rendering mode: Zink${NC}"
+    else
+        echo -e "${YELLOW}[+] Rendering mode: Compatibility (llvmpipe)${NC}"
+    fi
     sleep 2
 }
 
@@ -175,6 +250,7 @@ step_x11() {
     echo ""
     install_pkg "termux-x11-nightly" "Termux-X11 Display Server"
     install_pkg "xorg-xrandr" "XRandR (Display Settings)"
+    install_pkg "xkeyboard-config" "XKB Keyboard Data"
 }
 
 # ============== STEP 4: INSTALL DESKTOP ==============
@@ -194,8 +270,10 @@ step_desktop() {
     elif [ "$DE_CHOICE" == "2" ]; then
         # LXQt
         install_pkg "lxqt" "LXQt Desktop"
+        install_pkg "openbox" "Openbox Window Manager"
         install_pkg "qterminal" "QTerminal"
         install_pkg "pcmanfm-qt" "PCManFM-Qt"
+        install_pkg "breeze-icons" "Breeze Icon Theme"
         install_pkg "featherpad" "FeatherPad"
     elif [ "$DE_CHOICE" == "3" ]; then
         # MATE
@@ -216,11 +294,31 @@ step_gpu() {
     update_progress
     echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Installing GPU Acceleration...${NC}"
     echo ""
-    install_pkg "mesa-zink" "Mesa Zink Core"
-    if [ "$GPU_DRIVER" == "freedreno" ]; then
-        install_pkg "mesa-vulkan-icd-freedreno" "Turnip Adreno Driver"
+
+    if dpkg -s vulkan-loader-generic > /dev/null 2>&1; then
+        (DEBIAN_FRONTEND=noninteractive apt-get remove -y vulkan-loader-generic > /dev/null 2>&1) &
+        spinner $! "Removing conflicting vulkan-loader-generic..."
     fi
+
     install_pkg "vulkan-loader-android" "Vulkan Loader"
+
+    if [ "$USE_ZINK" == "1" ]; then
+        if ! install_pkg "mesa-zink" "Mesa Zink Core"; then
+            echo -e "${YELLOW}[!] mesa-zink failed to install. Falling back to compatibility renderer.${NC}"
+            USE_ZINK=0
+        fi
+    fi
+
+    if [ "$GPU_DRIVER" == "freedreno" ] && [ "$USE_ZINK" == "1" ]; then
+        if ! install_pkg "mesa-vulkan-icd-freedreno" "Turnip Adreno Driver"; then
+            echo -e "${YELLOW}[!] Turnip driver install failed. Falling back to compatibility renderer.${NC}"
+            USE_ZINK=0
+        fi
+    fi
+
+    if [ "$USE_ZINK" == "0" ]; then
+        echo -e "${YELLOW}[!] Using llvmpipe compatibility mode to avoid zink startup failures.${NC}"
+    fi
 }
 
 # ============== STEP 6: INSTALL AUDIO ==============
@@ -231,11 +329,32 @@ step_audio() {
     install_pkg "pulseaudio" "PulseAudio Server"
 }
 
-# ============== STEP 7: INSTALL APPS (VS Code, VLC, etc.) ==============
+# ============== STEP 7: OPTIONAL VNC SERVER ==============
+step_vnc() {
+    update_progress
+    echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Setting up VNC Server...${NC}"
+    echo ""
+
+    if [ "$ENABLE_VNC" != "1" ]; then
+        echo -e "  [*] Skipping TigerVNC setup (disabled by user)."
+        return
+    fi
+
+    install_pkg "tigervnc" "TigerVNC Server"
+    install_pkg "xorg-xauth" "Xauth Utilities"
+}
+
+# ============== STEP 8: INSTALL APPS (VS Code, VLC, etc.) ==============
 step_apps() {
     update_progress
     echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Installing Media & Dev Apps...${NC}"
     echo ""
+
+    if [ "$INSTALL_OPTIONAL_APPS" != "1" ]; then
+        echo -e "  [*] Skipping optional app installation (disabled by user)."
+        return
+    fi
+
     install_pkg "firefox" "Firefox Browser"
     install_pkg "vlc" "VLC Media Player"
     install_pkg "git" "Git Version Control"
@@ -243,7 +362,7 @@ step_apps() {
     install_pkg "curl" "cURL"
 }
 
-# ============== STEP 8: PYTHON & FLASK DEMO ==============
+# ============== STEP 9: PYTHON & FLASK DEMO ==============
 step_python() {
     update_progress
     echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Installing Python Environment...${NC}"
@@ -276,7 +395,7 @@ EOF
     echo -e "  [+] Python Web Demo created in ~/demo_python"
 }
 
-# ============== STEP 9: INSTALL WINE ==============
+# ============== STEP 10: INSTALL WINE ==============
 step_wine() {
     update_progress
     echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Installing Windows Support (Wine/Box64)...${NC}"
@@ -291,7 +410,7 @@ step_wine() {
     ln -sf /data/data/com.termux/files/usr/opt/hangover-wine/bin/winecfg /data/data/com.termux/files/usr/bin/winecfg
 }
 
-# ============== STEP 10: CREATE LAUNCHERS ==============
+# ============== STEP 11: CREATE LAUNCHERS ==============
 step_launchers() {
     update_progress
     echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Configuring Startup Scripts...${NC}"
@@ -312,6 +431,10 @@ step_launchers() {
     # GPU & Environment Config
     cat > ~/.config/linux-gpu.sh << EOF
 export MESA_NO_ERROR=1
+EOF
+
+    if [ "$USE_ZINK" == "1" ]; then
+        cat >> ~/.config/linux-gpu.sh << 'EOF'
 export MESA_GL_VERSION_OVERRIDE=4.6
 export MESA_GLES_VERSION_OVERRIDE=3.2
 export GALLIUM_DRIVER=zink
@@ -320,6 +443,13 @@ export TU_DEBUG=noconform
 export MESA_VK_WSI_PRESENT_MODE=immediate
 export ZINK_DESCRIPTORS=lazy
 EOF
+    else
+        cat >> ~/.config/linux-gpu.sh << 'EOF'
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+unset MESA_LOADER_DRIVER_OVERRIDE
+EOF
+    fi
 
     if [ "$DE_CHOICE" == "4" ]; then
         echo "export KWIN_COMPOSE=O2ES" >> ~/.config/linux-gpu.sh
@@ -348,20 +478,32 @@ PLANKEOF
         1)
             EXEC_CMD="exec startxfce4"
             KILL_CMD="pkill -9 xfce4-session; pkill -9 plank"
+            VNC_EXEC_CMD="exec startxfce4"
             ;;
         2)
             EXEC_CMD="exec startlxqt"
             KILL_CMD="pkill -9 lxqt-session"
+            VNC_EXEC_CMD="exec startlxqt"
             ;;
         3)
             EXEC_CMD="exec mate-session"
             KILL_CMD="pkill -9 mate-session; pkill -9 plank"
+            VNC_EXEC_CMD="exec mate-session"
             ;;
         4)
-            EXEC_CMD="(sleep 5 && pkill -9 plasmashell && plasmashell) > /dev/null 2>&1 &\nexec startplasma-x11"
+            EXEC_CMD="(sleep 5 && pkill -9 plasmashell && plasmashell) > /dev/null 2>&1 & exec startplasma-x11"
             KILL_CMD="pkill -9 startplasma-x11; pkill -9 kwin_x11"
+            VNC_EXEC_CMD="exec startplasma-x11"
             ;;
     esac
+
+    if [ "$DE_CHOICE" == "2" ]; then
+        mkdir -p ~/.config/lxqt
+        cat > ~/.config/lxqt/session.conf << 'EOF'
+[General]
+window_manager=openbox
+EOF
+    fi
 
     # Main Launcher
     cat > ~/start-linux.sh << LAUNCHEREOF
@@ -386,7 +528,8 @@ pactl load-module module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymou
 export PULSE_SERVER=127.0.0.1
 
 echo "[*] Starting X11 server..."
-termux-x11 :0 -ac &
+export XKB_CONFIG_ROOT=/data/data/com.termux/files/usr/share/X11/xkb
+termux-x11 :0 -ac -xkbdir "\${XKB_CONFIG_ROOT}" &
 sleep 3
 export DISPLAY=:0
 
@@ -398,6 +541,31 @@ ${EXEC_CMD}
 LAUNCHEREOF
     chmod +x ~/start-linux.sh
     echo -e "  [+] Created ~/start-linux.sh"
+
+    cat > ~/start-linux-safe.sh << 'SAFEEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+echo ""
+echo "[*] Starting desktop in compatibility rendering mode..."
+echo ""
+
+if [ -f ~/.config/linux-gpu.sh ]; then
+    cp ~/.config/linux-gpu.sh ~/.config/linux-gpu.sh.backup 2>/dev/null
+fi
+
+cat > ~/.config/linux-gpu.sh << 'EOF'
+export MESA_NO_ERROR=1
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+unset MESA_LOADER_DRIVER_OVERRIDE
+export XDG_DATA_DIRS=/data/data/com.termux/files/usr/share:${XDG_DATA_DIRS}
+export XDG_CONFIG_DIRS=/data/data/com.termux/files/usr/etc/xdg:${XDG_CONFIG_DIRS}
+EOF
+
+echo "[*] Compatibility mode enabled. Starting normal launcher..."
+exec ~/start-linux.sh
+SAFEEOF
+    chmod +x ~/start-linux-safe.sh
+    echo -e "  [+] Created ~/start-linux-safe.sh"
     
     # Stopper
     cat > ~/stop-linux.sh << STOPEOF
@@ -411,17 +579,108 @@ echo "Desktop stopped."
 STOPEOF
     chmod +x ~/stop-linux.sh
     echo -e "  [+] Created ~/stop-linux.sh"
+
+    if [ "$ENABLE_VNC" == "1" ]; then
+        mkdir -p ~/.vnc
+        cat > ~/.vnc/xstartup << VNCXEOF
+#!/data/data/com.termux/files/usr/bin/bash
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+source ~/.config/linux-gpu.sh 2>/dev/null
+export XKB_CONFIG_ROOT=/data/data/com.termux/files/usr/share/X11/xkb
+${VNC_EXEC_CMD}
+VNCXEOF
+        chmod +x ~/.vnc/xstartup
+
+        cat > ~/start-vnc.sh << 'VNCSTARTEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+DISPLAY_NUM="${1:-1}"
+GEOMETRY="${VNC_GEOMETRY:-1280x720}"
+DEPTH="${VNC_DEPTH:-24}"
+
+echo "[*] Starting VNC on :${DISPLAY_NUM} (${GEOMETRY}, ${DEPTH}-bit)..."
+vncserver -kill ":${DISPLAY_NUM}" > /dev/null 2>&1
+vncserver ":${DISPLAY_NUM}" -geometry "${GEOMETRY}" -depth "${DEPTH}" -localhost no
+
+echo "-----------------------------------------------"
+echo "  [*] VNC started on port $((5900 + DISPLAY_NUM))"
+echo "  [*] Connect with any VNC client to this device IP"
+echo "-----------------------------------------------"
+VNCSTARTEOF
+        chmod +x ~/start-vnc.sh
+        echo -e "  [+] Created ~/start-vnc.sh"
+
+        cat > ~/stop-vnc.sh << 'VNCSTOPEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+DISPLAY_NUM="${1:-1}"
+echo "[*] Stopping VNC on :${DISPLAY_NUM}..."
+vncserver -kill ":${DISPLAY_NUM}" > /dev/null 2>&1
+echo "[+] VNC server stopped."
+VNCSTOPEOF
+        chmod +x ~/stop-vnc.sh
+        echo -e "  [+] Created ~/stop-vnc.sh"
+    fi
+
+    cat > ~/uninstall-linux.sh << 'UNINSTALLEOF'
+#!/data/data/com.termux/files/usr/bin/bash
+echo ""
+echo "[*] Termux Linux cleanup"
+echo ""
+
+read -p "Remove generated launcher/config files? [Y/n]: " REMOVE_FILES
+REMOVE_FILES=${REMOVE_FILES:-Y}
+if [[ "$REMOVE_FILES" =~ ^[Yy]$ ]]; then
+    rm -f ~/start-linux.sh ~/start-linux-safe.sh ~/stop-linux.sh ~/start-vnc.sh ~/stop-vnc.sh
+    rm -f ~/demo_python/app.py
+    rm -rf ~/demo_python
+    rm -rf ~/.vnc
+    rm -f ~/.config/linux-gpu.sh
+    rm -f ~/.config/autostart/plank.desktop
+    rm -f ~/.config/plasma-workspace/env/xdg_fix.sh
+    rm -f ~/.config/lxqt/session.conf
+    rm -f ~/Desktop/Firefox.desktop ~/Desktop/VLC.desktop ~/Desktop/Wine_Config.desktop ~/Desktop/Terminal.desktop
+    echo "[+] Removed generated files."
+fi
+
+read -p "Also remove major desktop packages (this may take time)? [y/N]: " REMOVE_PKGS
+REMOVE_PKGS=${REMOVE_PKGS:-N}
+if [[ "$REMOVE_PKGS" =~ ^[Yy]$ ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y \
+        xfce4 xfce4-terminal xfce4-whiskermenu-plugin \
+        lxqt openbox qterminal pcmanfm-qt featherpad \
+        mate mate-tweak mate-terminal \
+        plasma-desktop konsole dolphin \
+        plank-reloaded firefox vlc \
+        hangover-wine hangover-wowbox64 \
+        termux-x11-nightly tigervnc pulseaudio \
+        mesa-zink mesa-vulkan-icd-freedreno vulkan-loader-android \
+        xorg-xrandr xkeyboard-config xorg-xauth > /dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get autoremove -y > /dev/null 2>&1
+    echo "[+] Package cleanup finished."
+fi
+
+echo "[+] Cleanup completed."
+UNINSTALLEOF
+    chmod +x ~/uninstall-linux.sh
+    echo -e "  [+] Created ~/uninstall-linux.sh"
 }
 
-# ============== STEP 11: CREATE SHORTCUTS ==============
+# ============== STEP 12: CREATE SHORTCUTS ==============
 step_shortcuts() {
     update_progress
     echo -e "${PURPLE}[Step ${CURRENT_STEP}/${TOTAL_STEPS}] Creating Desktop Shortcuts...${NC}"
     echo ""
+
+    if [ "$CREATE_DESKTOP_SHORTCUTS" != "1" ]; then
+        echo -e "  [*] Skipping shortcut creation (disabled by user)."
+        return
+    fi
+
     mkdir -p ~/Desktop
     
     # App shortcuts
-    cat > ~/Desktop/Firefox.desktop << 'EOF'
+    if [ "$INSTALL_OPTIONAL_APPS" == "1" ]; then
+        cat > ~/Desktop/Firefox.desktop << 'EOF'
 [Desktop Entry]
 Name=Firefox
 Exec=firefox
@@ -429,15 +688,16 @@ Icon=firefox
 Type=Application
 EOF
 
-
-
-    cat > ~/Desktop/VLC.desktop << 'EOF'
+        cat > ~/Desktop/VLC.desktop << 'EOF'
 [Desktop Entry]
 Name=VLC Media Player
 Exec=vlc
 Icon=vlc
 Type=Application
 EOF
+    else
+        rm -f ~/Desktop/Firefox.desktop ~/Desktop/VLC.desktop 2>/dev/null
+    fi
 
     cat > ~/Desktop/Wine_Config.desktop << 'EOF'
 [Desktop Entry]
@@ -463,7 +723,11 @@ Type=Application
 EOF
 
     chmod +x ~/Desktop/*.desktop 2>/dev/null
-    echo -e "  [+] Added Firefox, VLC, Wine, and Terminal shortcuts."
+    if [ "$INSTALL_OPTIONAL_APPS" == "1" ]; then
+        echo -e "  [+] Added Firefox, VLC, Wine, and Terminal shortcuts."
+    else
+        echo -e "  [+] Added Wine and Terminal shortcuts."
+    fi
 }
 
 # ============== COMPLETION ==============
@@ -480,13 +744,30 @@ COMPLETE
     echo -e "${WHITE}[*] Your ${DE_NAME} environment is ready.${NC}"
     echo -e "${CYAN}[*] Installed Software:${NC}"
     echo "    - Python (Flask Demo located in ~/demo_python)"
-    echo "    - Firefox Browser & VLC Media Player"
+    if [ "$INSTALL_OPTIONAL_APPS" == "1" ]; then
+        echo "    - Firefox Browser & VLC Media Player"
+    else
+        echo "    - Optional GUI apps were skipped"
+    fi
     echo "    - Wine & Hangover (Windows PC App compatibility)"
-    echo "    - GPU Hardware Acceleration Enabled"
+    if [ "$USE_ZINK" == "1" ]; then
+        echo "    - GPU Hardware Acceleration (Zink)"
+    else
+        echo "    - Compatibility Renderer (llvmpipe)"
+    fi
+    if [ "$ENABLE_VNC" == "1" ]; then
+        echo "    - TigerVNC Remote Desktop Server"
+    fi
     echo ""
     echo -e "${YELLOW}------------------------------------------------------------${NC}"
     echo -e "${WHITE}[*] TO START THE DESKTOP:${NC}  ${GREEN}./start-linux.sh${NC}"
+    echo -e "${WHITE}[*] SAFE MODE (NO ZINK):${NC}   ${GREEN}./start-linux-safe.sh${NC}"
     echo -e "${WHITE}[*] TO STOP THE DESKTOP:${NC}   ${GREEN}./stop-linux.sh${NC}"
+    if [ "$ENABLE_VNC" == "1" ]; then
+        echo -e "${WHITE}[*] TO START VNC (DISPLAY :1):${NC} ${GREEN}./start-vnc.sh${NC}"
+        echo -e "${WHITE}[*] TO STOP VNC (DISPLAY :1):${NC}  ${GREEN}./stop-vnc.sh${NC}"
+    fi
+    echo -e "${WHITE}[*] TO UNINSTALL/CLEANUP:${NC} ${GREEN}./uninstall-linux.sh${NC}"
     echo -e "${YELLOW}------------------------------------------------------------${NC}"
     echo ""
 }
@@ -502,6 +783,7 @@ main() {
     step_desktop
     step_gpu
     step_audio
+    step_vnc
     step_apps
     step_python
     step_wine
